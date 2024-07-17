@@ -1,0 +1,141 @@
+package com.app.flagtick;
+
+import com.app.flagtick.deserializer.EmployeeDeserializer;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.module.SimpleModule;
+import org.apache.http.HttpEntity;
+import org.apache.http.HttpResponse;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.http.util.EntityUtils;
+import org.apache.pdfbox.Loader;
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.interactive.form.PDAcroForm;
+import org.apache.pdfbox.pdmodel.interactive.form.PDField;
+import org.apache.pdfbox.pdmodel.interactive.form.PDFieldTree;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URISyntaxException;
+import java.net.URL;
+import java.nio.file.Paths;
+import java.util.*;
+
+public class App {
+    private static final Logger LOGGER = LoggerFactory.getLogger(App.class);
+    private static final Map<String, String> templateTaxes = new HashMap<>();
+
+    private static String FT_TEXT_FIELD = "Tx";
+
+    public static void main(String[] args) {
+        try (InputStream input = App.class.getClassLoader().getResourceAsStream("application.properties")) {
+            if (input == null) {
+                LOGGER.error("Sorry, unable to find application.properties");
+                return;
+            }
+
+            Properties prop = new Properties();
+            prop.load(input);
+
+            String templates = prop.getProperty("templates");
+            if (templates != null && !templates.isEmpty()) {
+                for (String kv : templates.split(",")) {
+                    String[] a = kv.split(":");
+                    if (a.length == 2) {
+                        templateTaxes.put(a[0], a[1]);
+                    }
+                }
+                // Load PDF Template
+                CloseableHttpClient httpClient = HttpClients.createDefault();
+                HttpGet request = new HttpGet("https://dummy.restapiexample.com/api/v1/employee/1");
+                HttpResponse response = httpClient.execute(request);
+                HttpEntity entity = response.getEntity();
+                String result = EntityUtils.toString(entity);
+
+                ObjectMapper mapper = new ObjectMapper();
+                SimpleModule module = new SimpleModule();
+                module.addDeserializer(Map.class, new EmployeeDeserializer());
+                mapper.registerModule(module);
+
+                Map<String, Object> employeeData = mapper.readValue(result, Map.class);
+
+                // Print the extracted information
+                System.out.println("Employee Name: " + employeeData.get("employee_name"));
+                System.out.println("Employee Salary: " + employeeData.get("employee_salary"));
+                System.out.println("Employee Age: " + employeeData.get("employee_age"));
+
+                HashMap<String, String> transformedEmployeeData = new HashMap<>();
+                for (Map.Entry<String, Object> entry : employeeData.entrySet()) {
+                    String originalKey = entry.getKey();
+                    String newKey = originalKey + "[0]";
+                    transformedEmployeeData.put(newKey, String.valueOf(entry.getValue()));
+                }
+                employeeData.clear();
+                employeeData.putAll(transformedEmployeeData);
+
+                String template = null;
+                if (templateTaxes.containsKey("2023")) {
+                    template = templateTaxes.get("2023");
+                }
+
+                System.out.println("Template: " + template);
+                try {
+                    URL res = App.class.getClassLoader().getResource(template);
+                    if (res == null) {
+                        System.out.println("Resource not found: " + template);
+                        return;
+                    }
+                    File file = Paths.get(res.toURI()).toFile();
+                    PDDocument document = Loader.loadPDF(file);
+                    try {
+                        PDAcroForm acroForm = document.getDocumentCatalog().getAcroForm();
+                        if (acroForm != null) {
+                            PDFieldTree fieldTree = acroForm.getFieldTree();
+                            for (PDField field : fieldTree) {
+                                String fullyQualifiedName = field.getFullyQualifiedName();
+                                String partialName = field.getPartialName();
+                                String fieldType = field.getFieldType();
+                                System.out.println("Field name: " + fullyQualifiedName);
+                                System.out.println("Field Partial Name: " + partialName);
+                                System.out.println("Field type: " + fieldType);
+                                System.out.println("Field class: " + field.getClass().getSimpleName());
+
+                                if (fieldType != null && fieldType.equals(FT_TEXT_FIELD) && employeeData.containsKey(partialName)) {
+                                    field.setValue((String) employeeData.get(partialName));
+                                }
+                            }
+                            acroForm.flatten();
+                        } else {
+                            System.out.println("The PDF does not contain any form fields.");
+                        }
+                        String filename = UUID.randomUUID() + ".pdf";
+
+                        // Define the target folder relative to your project root
+                        String targetFolder = "pdfs";
+                        File folder = new File(targetFolder);
+                        if (!folder.exists()) {
+                            folder.mkdirs();
+                        }
+                        File savedFile = new File(folder, filename);
+                        document.save(savedFile.getAbsolutePath());
+                    } finally {
+                        document.close();
+                    }
+                } catch (IOException | URISyntaxException e) {
+                    System.out.println("Exception: " + e.getMessage());
+                    e.printStackTrace();
+                }
+
+                LOGGER.info("Templates loaded successfully: {}", templateTaxes);
+            } else {
+                LOGGER.warn("No templates found in application.properties");
+            }
+        } catch (IOException e) {
+            LOGGER.error("Error loading application.properties", e);
+        }
+    }
+}
